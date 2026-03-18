@@ -11,20 +11,28 @@ logger = logging.getLogger(__name__)
 # Try to import libsql_client for Turso cloud support
 _use_turso = False
 _turso_client = None
+_turso_initialized = False
 
-if config.TURSO_DATABASE_URL:
-    try:
-        import libsql_client
-        # libsql_client needs https:// not libsql://
-        _turso_url = config.TURSO_DATABASE_URL.replace("libsql://", "https://")
-        _turso_client = libsql_client.create_client_sync(
-            url=_turso_url,
-            auth_token=config.TURSO_AUTH_TOKEN,
-        )
-        _use_turso = True
-        logger.info("Using libsql_client for Turso cloud database")
-    except ImportError:
-        logger.warning("libsql_client not installed, falling back to sqlite3")
+
+def _get_turso_client():
+    """Lazy-initialize Turso client on first use."""
+    global _use_turso, _turso_client, _turso_initialized
+    if _turso_initialized:
+        return _turso_client
+    _turso_initialized = True
+    if config.TURSO_DATABASE_URL:
+        try:
+            import libsql_client
+            _turso_url = config.TURSO_DATABASE_URL.replace("libsql://", "https://")
+            _turso_client = libsql_client.create_client_sync(
+                url=_turso_url,
+                auth_token=config.TURSO_AUTH_TOKEN,
+            )
+            _use_turso = True
+            logger.info("Using libsql_client for Turso cloud database")
+        except ImportError:
+            logger.warning("libsql_client not installed, falling back to sqlite3")
+    return _turso_client
 
 
 def _get_sqlite_path():
@@ -38,6 +46,7 @@ def _get_sqlite_path():
 def get_db():
     """Yield a connection-like object. For local SQLite, yields a real connection.
     For Turso, yields a wrapper around libsql_client."""
+    _get_turso_client()
     if _use_turso:
         yield TursoConnection()
     else:
