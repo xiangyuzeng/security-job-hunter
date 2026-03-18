@@ -1,6 +1,8 @@
+import json
 import logging
-import re
 import sqlite3
+import urllib.request
+import urllib.error
 from datetime import datetime
 from contextlib import contextmanager
 
@@ -8,31 +10,104 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# Try to import libsql_client for Turso cloud support
-_use_turso = False
-_turso_client = None
-_turso_initialized = False
+# Turso HTTP API support (replaces libsql_client for serverless compatibility)
+_use_turso = bool(config.TURSO_DATABASE_URL)
+_turso_url = ""
+_turso_token = ""
+
+if _use_turso:
+    _turso_url = config.TURSO_DATABASE_URL.replace("libsql://", "https://")
+    _turso_token = config.TURSO_AUTH_TOKEN
+    logger.info(f"Using Turso HTTP API: {_turso_url}")
 
 
-def _get_turso_client():
-    """Lazy-initialize Turso client on first use."""
-    global _use_turso, _turso_client, _turso_initialized
-    if _turso_initialized:
-        return _turso_client
-    _turso_initialized = True
-    if config.TURSO_DATABASE_URL:
-        try:
-            import libsql_client
-            _turso_url = config.TURSO_DATABASE_URL.replace("libsql://", "https://")
-            _turso_client = libsql_client.create_client_sync(
-                url=_turso_url,
-                auth_token=config.TURSO_AUTH_TOKEN,
-            )
-            _use_turso = True
-            logger.info("Using libsql_client for Turso cloud database")
-        except ImportError:
-            logger.warning("libsql_client not installed, falling back to sqlite3")
-    return _turso_client
+def _turso_execute(sql, params=None):
+    """Execute SQL via Turso HTTP pipeline API."""
+    stmt = {"sql": sql}
+    if params:
+        args = []
+        for p in params:
+            if p is None:
+                args.append({"type": "null"})
+            elif isinstance(p, bool):
+                args.append({"type": "integer", "value": str(int(p))})
+            elif isinstance(p, int):
+                args.append({"type": "integer", "value": str(p)})
+            elif isinstance(p, float):
+                args.append({"type": "float", "value": str(p)})
+            else:
+                args.append({"type": "text", "value": str(p)})
+        stmt["args"] = args
+
+    payload = json.dumps({"requests": [{"type": "execute", "stmt": stmt}]}).encode()
+    req = urllib.request.Request(
+        f"{_turso_url}/v2/pipeline",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {_turso_token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        logger.error(f"Turso HTTP error {e.code}: {body}")
+        raise
+    except urllib.error.URLError as e:
+        logger.error(f"Turso URL error: {e.reason}")
+        raise
+
+    result = data["results"][0]
+    if result["type"] == "error":
+        raise Exception(f"Turso SQL error: {result['error']['message']}")
+
+    response = result["response"]["result"]
+    cols = [c["name"] for c in response.get("cols", [])]
+    rows = []
+    for row in response.get("rows", []):
+        rows.append([_parse_turso_value(v) for v in row])
+    return cols, rows
+
+
+def _parse_turso_value(v):
+    """Parse a Turso value object into a Python value."""
+    if v["type"] == "null":
+        return None
+    elif v["type"] == "integer":
+        return int(v["value"])
+    elif v["type"] == "float":
+        return float(v["value"])
+    else:
+        return v["value"]
+
+
+class TursoCursor:
+    """Minimal cursor interface wrapping Turso HTTP API results."""
+    def __init__(self, cols, rows):
+        self.description = [(col, None, None, None, None, None, None) for col in cols]
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+class TursoConnection:
+    """Connection-like wrapper using Turso HTTP API."""
+
+    def execute(self, sql, params=None):
+        cols, rows = _turso_execute(sql, list(params) if params else None)
+        return TursoCursor(cols, rows)
+
+    def commit(self):
+        pass
+
+    def close(self):
+        pass
 
 
 def _get_sqlite_path():
@@ -44,9 +119,7 @@ def _get_sqlite_path():
 
 @contextmanager
 def get_db():
-    """Yield a connection-like object. For local SQLite, yields a real connection.
-    For Turso, yields a wrapper around libsql_client."""
-    _get_turso_client()
+    """Yield a connection-like object."""
     if _use_turso:
         yield TursoConnection()
     else:
@@ -58,38 +131,6 @@ def get_db():
             conn.commit()
         finally:
             conn.close()
-
-
-class TursoCursor:
-    """Minimal cursor interface wrapping a libsql_client result set."""
-    def __init__(self, result_set):
-        self._rs = result_set
-        self.description = [(col, None, None, None, None, None, None) for col in result_set.columns] if result_set.columns else []
-
-    def fetchall(self):
-        return self._rs.rows
-
-    def fetchone(self):
-        return self._rs.rows[0] if self._rs.rows else None
-
-
-class TursoConnection:
-    """Minimal connection-like wrapper around libsql_client.
-    Supports execute() and commit() to match sqlite3 interface."""
-
-    def execute(self, sql, params=None):
-        # libsql_client uses positional args
-        if params:
-            rs = _turso_client.execute(sql, list(params))
-        else:
-            rs = _turso_client.execute(sql)
-        return TursoCursor(rs)
-
-    def commit(self):
-        pass  # libsql_client auto-commits
-
-    def close(self):
-        pass
 
 
 def _rows_to_dicts(cursor):
@@ -106,10 +147,7 @@ def _fetchone_value(cursor, idx=0):
     row = cursor.fetchone()
     if row is None:
         return None
-    if _use_turso:
-        return row[idx]
-    else:
-        return row[idx]
+    return row[idx]
 
 
 def init_db():
