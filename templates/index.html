@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Security Job Hunter</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+    <link href="/static/style.css" rel="stylesheet">
+</head>
+<body>
+    <!-- Top Bar -->
+    <nav class="navbar navbar-dark px-4 py-3" style="background: #6d28d9;">
+        <div class="d-flex align-items-center gap-3">
+            <i class="bi bi-shield-lock-fill fs-4"></i>
+            <span class="navbar-brand mb-0 h4">Security Job Hunter</span>
+        </div>
+        <div class="d-flex align-items-center gap-4 text-white">
+            <div class="stats-bar d-flex gap-4">
+                <span class="stat-item">
+                    <span class="stat-label">Total</span>
+                    <span class="stat-value" id="stat-total">&mdash;</span>
+                </span>
+                <span class="stat-item">
+                    <span class="stat-label">New</span>
+                    <span class="stat-value text-warning" id="stat-new">&mdash;</span>
+                </span>
+                <span class="stat-item">
+                    <span class="stat-label">Today</span>
+                    <span class="stat-value text-info" id="stat-today">&mdash;</span>
+                </span>
+                <span class="stat-item">
+                    <span class="stat-label">Applied</span>
+                    <span class="stat-value text-success" id="stat-applied">&mdash;</span>
+                </span>
+                <span class="stat-item">
+                    <span class="stat-label">Favorites</span>
+                    <span class="stat-value text-danger" id="stat-favorites">&mdash;</span>
+                </span>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+                <small id="last-refresh" class="opacity-75">Last refresh: &mdash;</small>
+                <button class="btn btn-light btn-sm" id="btn-refresh" onclick="manualRefresh()">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Filters -->
+    <div class="container-fluid px-4 py-3 bg-light border-bottom">
+        <div class="row g-2 align-items-center">
+            <div class="col-auto">
+                <input type="text" class="form-control form-control-sm" id="filter-search"
+                       placeholder="Search jobs..." oninput="debouncedLoadJobs()">
+            </div>
+            <div class="col-auto">
+                <select class="form-select form-select-sm" id="filter-status" onchange="loadJobs()">
+                    <option value="all">All Statuses</option>
+                    <option value="new" selected>New</option>
+                    <option value="seen">Seen</option>
+                    <option value="applied">Applied</option>
+                    <option value="hidden">Hidden</option>
+                </select>
+            </div>
+            <div class="col-auto">
+                <select class="form-select form-select-sm" id="filter-source" onchange="loadJobs()">
+                    <option value="all">All Sources</option>
+                    <option value="indeed">Indeed</option>
+                    <option value="linkedin">LinkedIn</option>
+                    <option value="glassdoor">Glassdoor</option>
+                    <option value="google">Google</option>
+                    <option value="zip_recruiter">ZipRecruiter</option>
+                </select>
+            </div>
+            <div class="col-auto">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="filter-favorite" onchange="loadJobs()">
+                    <label class="form-check-label" for="filter-favorite">
+                        <i class="bi bi-star-fill text-warning"></i> Favorites only
+                    </label>
+                </div>
+            </div>
+            <div class="col-auto ms-auto">
+                <span class="text-muted small" id="results-count"></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Job Table -->
+    <div class="container-fluid px-4 py-3">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle" id="jobs-table">
+                <thead class="table-light">
+                    <tr>
+                        <th style="width:30px"></th>
+                        <th class="sortable" data-sort="title" onclick="toggleSort('title')">
+                            Title <i class="bi bi-chevron-expand sort-icon"></i>
+                        </th>
+                        <th class="sortable" data-sort="company" onclick="toggleSort('company')">
+                            Company <i class="bi bi-chevron-expand sort-icon"></i>
+                        </th>
+                        <th>Salary</th>
+                        <th class="sortable" data-sort="date_posted" onclick="toggleSort('date_posted')">
+                            Posted <i class="bi bi-chevron-down sort-icon"></i>
+                        </th>
+                        <th class="sortable" data-sort="source" onclick="toggleSort('source')">
+                            Source <i class="bi bi-chevron-expand sort-icon"></i>
+                        </th>
+                        <th>Status</th>
+                        <th style="width:60px">Apply</th>
+                    </tr>
+                </thead>
+                <tbody id="jobs-body">
+                    <tr>
+                        <td colspan="8" class="text-center py-5 text-muted">
+                            <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                            Loading jobs...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="text-center">
+            <button class="btn btn-outline-primary btn-sm" id="btn-load-more" onclick="loadMore()" style="display:none">
+                Load more
+            </button>
+        </div>
+    </div>
+
+    <!-- Job Detail Modal -->
+    <div class="modal fade" id="jobModal" tabindex="-1">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="modal-title"></h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <span class="badge bg-secondary" id="modal-company"></span>
+                        <span class="badge bg-info" id="modal-source"></span>
+                        <span class="badge bg-success" id="modal-salary"></span>
+                        <span class="badge bg-warning text-dark" id="modal-date"></span>
+                    </div>
+                    <div id="modal-description" class="job-description"></div>
+                </div>
+                <div class="modal-footer">
+                    <a id="modal-apply-link" href="#" target="_blank" class="btn btn-primary">
+                        <i class="bi bi-box-arrow-up-right"></i> Apply Now
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>
